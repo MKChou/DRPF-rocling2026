@@ -1,38 +1,106 @@
-# DRPF-rocling2026
+# DRPF: Deployment Risk Probe Framework
 
-ROCLING 2026 論文 *Deployment Risk Probe Framework (DRPF)* 的可重現性材料。內容對應 camera-ready 的可重現性聲明，只放聲明中寫明釋出的項目。
+Probe sets and scoring code for the ROCLING 2026 paper **Deployment Risk Probe Framework (DRPF): Complementing CER with Actionable Failure Modes**.
 
-主表數字受錄音、API 版本與環境差異影響。以自行錄製的音訊重跑，預期得到同結構、非同值的結果。
+DRPF splits ASR errors into three types. Each type calls for a different follow-up action:
 
-## 釋出內容
+| Error type | Rate | Follow-up |
+| --- | --- | --- |
+| (i) Text on non-speech input | R_ne | Filter the input or tune VAD |
+| (ii) Empty output on speech | R_empty | Ask the user to repeat; never default to consent |
+| (iii) Incorrect content on speech | R_nem | Manual verification |
 
-1. **C1 靜音**與 **C2B 取樣清單**
-   - `data/c1_silence/`：數位靜音 3/5/8/10 秒各 25 段，共 100 段，16 kHz 單聲道。
-   - `data/manifests/c1_silence.csv`
-   - `data/manifests/c2b_demand.csv`：DEMAND 五場景（PCAFETER、OHALLWAY、OOFFICE、PRESTO、DLIVING）各 20 段、每段 5 秒的起點清單。
-   - `data/c2b/SOURCES.md`：場景對照、授權與 zip SHA-256。C2B 音檔本身不在本倉庫，可依清單自 [DEMAND](https://doi.org/10.5281/zenodo.1227121)（CC BY-SA 3.0）裁切。
+The polarity-conflict probe (PCP) is a narrow subset of (iii). It flags negated short answers whose transcript contains a high-risk action word, such as 不要了 becoming 服藥了 ("take medication").
 
-2. **計分程式與公開設定**
-   - `scripts/text_norm.py`：全形半形、去標點空白、OpenCC `s2twp`，並把 `<{silent}>` 這類標記視為空輸出。
-   - `scripts/score_drpf.py`：\(R_{\mathrm{ne}}\)、\(R_{\mathrm{empty}}\)、\(R_{\mathrm{nem}}\)、PCP、KW-ERR。
-   - `scripts/vad_gate.py`：Silero VAD，門檻 0.5。
-   - `scripts/settings.py`：公開 Whisper `openai/whisper-large-v3-turbo`（語言 `zh`）、邊緣 Nemotron `nvidia/nemotron-3.5-asr-streaming-0.6b`（語言 `zh-CN`）、OpenCC `s2twp`。ACP 的 PCP 觸發詞為論文已寫明的「服藥、插管、急救」。
+## Contents
 
-3. **C3／C4 逐句腳本**
-   - `scripts/c3_c4_recording_script.txt`：短答 50 句與猶豫／填充 50 句。
+```
+data/
+  c1_silence/          C1: 100 digital-silence clips (3/5/8/10 s × 25), 16 kHz mono
+  c2b/README.md        C2B: DEMAND scenes, license and archive checksums
+  manifests/           C1 and C2B manifests (paths, offsets, durations)
+  scripts/             C3 short-answer and C4 hesitation scripts (Mandarin)
+drpf/
+  text_norm.py         Normalization: NFKC, OpenCC s2twp, strip punctuation, whitespace and <{silent}>
+  score_drpf.py        R_ne, R_empty, R_nem, CER, PCP and KW-ERR
+  vad_gate.py          Silero VAD gate (threshold 0.5)
+  settings.py          Model IDs, language settings, VAD threshold, OpenCC config, ACP triggers
+  build_c2b.py         Rebuilds the C2B clips from DEMAND
+results/
+  paper_counts.md      Aggregate counts reported in the paper
+```
 
-4. **主表聚合計數**
-   - `counts/main_table_counts.md`：抄自論文正文與各表，不是本倉庫重算的結果。
+## Probe sets
 
-## 不在本倉庫
+| Subset | Role | Released here |
+| --- | --- | --- |
+| C1 | (i) digital silence | Audio and manifest |
+| C2B | (i) environmental noise, five DEMAND scenes | Manifest; audio rebuilt by `drpf/build_c2b.py` |
+| C3 | (ii), (iii) and PCP on short answers | Script: 50 items (24 confirm, 19 negate, 7 other) |
+| C4 | (ii), (iii) on hesitations and fillers | Script: 50 items |
 
-C2A 醫院底噪、語者個人錄音檔、雲端 API 內部 `lang` 細節、Hold-out／金融／法律腳本，以及醫師提供的 C5 腳本與關鍵詞表 \(\mathcal{K}\)。
+The PCP set is the 19 C3 items marked `negate` in `data/scripts/c3_short.tsv`.
 
-## 計分
+To record C3 and C4, use 16 kHz mono WAV and one file per item. Trim long leading and trailing silence from C3 clips. Keep C4 fillers as spoken, without turning them into full sentences.
 
-JSONL 每行需有 `ref` 與 `hyp`。否定短答若要計 PCP，加上 `"negated": true`，或用 `--neg-ids` 指定句號。KW-ERR 另需自備詞表，一行一詞。
+## Setup
 
-```powershell
-python scripts/score_drpf.py results.jsonl --neg-ids 002,006,009
-python scripts/score_drpf.py results.jsonl --keywords my_keywords.txt
+Python 3.10 or later.
+
+```bash
+pip install -r requirements.txt
+```
+
+`vad_gate.py` downloads Silero VAD through `torch.hub` on first use.
+
+## Scoring
+
+Write ASR outputs as JSONL, one segment per line. Leave `ref` empty for non-speech segments. `id` is only needed for PCP.
+
+```json
+{"id": "009", "ref": "不要了", "hyp": "服藥了"}
+{"id": "silence_01_3s", "ref": "", "hyp": ""}
+```
+
+```bash
+python drpf/score_drpf.py outputs.jsonl
+python drpf/score_drpf.py outputs.jsonl --neg-from data/scripts/c3_short.tsv
+python drpf/score_drpf.py outputs.jsonl --keywords keywords.txt
+```
+
+After normalization, empty strings, whitespace-only output and markers such as `<{silent}>` all count as empty output. A hypothesis matches only if it equals the reference exactly after normalization.
+
+R_ne uses segments with an empty reference. R_empty, R_nem and CER use segments with a non-empty reference. KW-ERR takes a keyword list with one term per line.
+
+## Rebuilding C2B
+
+```bash
+python drpf/build_c2b.py
+```
+
+The script downloads the five 16 kHz DEMAND archives from Zenodo, checks their SHA-256, takes channel 01 and writes the 100 clips to `data/c2b/audio/`.
+
+## Not included
+
+- C2A hospital background noise
+- Individual speaker recordings
+- Internal language-setting values of the cloud API
+- Held-out, finance and legal scripts
+- C5 clinic sentences and the physician keyword list
+
+Scores depend on recordings, API versions and environment. Rerunning the probes on new recordings should reproduce the structure of the results, not the exact values in `results/paper_counts.md`.
+
+## License
+
+Code and C1 audio are released under the MIT License. DEMAND audio used for C2B remains under CC BY-SA 3.0.
+
+## Citation
+
+```bibtex
+@inproceedings{chou2026drpf,
+  title     = {Deployment Risk Probe Framework ({DRPF}): Complementing {CER} with Actionable Failure Modes},
+  author    = {Chou, Ming-Kun and Lo, Yu-Tai and Lu, Wen-Hsiang},
+  booktitle = {Proceedings of the 38th Conference on Computational Linguistics and Speech Processing (ROCLING 2026)},
+  year      = {2026}
+}
 ```
