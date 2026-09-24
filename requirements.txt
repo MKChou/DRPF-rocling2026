@@ -1,0 +1,4 @@
+opencc-python-reimplemented
+numpy
+soundfile
+torch
